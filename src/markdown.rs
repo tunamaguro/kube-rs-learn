@@ -15,7 +15,7 @@ pub struct MarkdonwViewSpec {
     pub markdowns: BTreeMap<String, String>,
     pub replicas: u32,
     #[serde(rename = "viewerImage")]
-    pub viewer_image: String,
+    pub viewer_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
