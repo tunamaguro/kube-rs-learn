@@ -1,4 +1,4 @@
-mod markdown;
+use controller::markdown;
 use kube::CustomResourceExt;
 use markdown::MarkdownView;
 

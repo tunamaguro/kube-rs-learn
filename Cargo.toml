@@ -2,6 +2,19 @@
 name = "learn-kube-rs"
 version = "0.1.0"
 edition = "2021"
+default-run = "controller"
+
+[[bin]]
+name = "controller"
+path = "src/main.rs"
+
+[[bin]]
+name = "crdgen"
+path = "src/crdgen.rs"
+
+[lib]
+name = "controller"
+path = "src/lib.rs"
 
 [dependencies]
 kube = { version = "0.92.0", features = ["runtime", "derive"] }
