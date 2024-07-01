@@ -3,7 +3,7 @@ use k8s_openapi::{
         apps::v1::{Deployment, DeploymentSpec},
         core::v1::{
             ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, HTTPGetAction, PodSpec,
-            PodTemplateSpec, Probe, Volume, VolumeMount,
+            PodTemplateSpec, Probe, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::{apis::meta::v1::LabelSelector, util::intstr::IntOrString},
@@ -22,7 +22,7 @@ pub struct Context {
     pub client: Client,
 }
 
-const CONTROLLER_NAME: &str = "markdown-manager";
+const CONTROLLER_NAME: &str = "markdown-view-manager";
 
 async fn reconcile_configmap(
     obj: Arc<MarkdownView>,
@@ -141,6 +141,49 @@ async fn reconcile_deployment(
             &Patch::Apply(&deployment),
         )
         .await?;
+
+    Ok(())
+}
+
+async fn reconcile_service(
+    obj: Arc<MarkdownView>,
+    ctx: Arc<Context>,
+) -> Result<(), Box<dyn Error>> {
+    let svc_name = format!("viewer-{}", obj.name_any());
+    let labels = serde_json::json!({
+        "app.kubernetes.io/name":"mdbook",
+        "app.kubernetes.io/instance":obj.name_any(),
+        "app.kubernetes.io/created-by": "markdown-view-controller"
+    });
+    let svc = Service {
+        metadata: ObjectMeta {
+            labels: Some(serde_json::from_value(labels.clone())?),
+            name: Some(svc_name),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            selector: Some(serde_json::from_value(labels.clone())?),
+            type_: Some("ClusterIP".to_string()),
+            ports: Some(vec![ServicePort {
+                protocol: Some("TCP".to_string()),
+                port: 80,
+                target_port: Some(IntOrString::Int(3000)),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &obj.namespace().unwrap());
+    let svc_patch = svc_api
+        .patch(
+            svc.metadata.name.as_deref().unwrap(),
+            &PatchParams::apply(CONTROLLER_NAME),
+            &Patch::Apply(&svc),
+        )
+        .await?;
+
     Ok(())
 }
 
