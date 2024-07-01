@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
     kind = "MarkdownView",
     namespaced
 )]
-#[kube(status = "MarkdownViewStatus")]
+#[kube(status = "MarkdownViewStatusEnum")]
 pub struct MarkdonwViewSpec {
     pub markdowns: BTreeMap<String, String>,
     pub replicas: u32,
@@ -20,10 +20,10 @@ pub struct MarkdonwViewSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MarkdownViewStatus {
-    status: MarkdownViewStatusEnum,
+    pub status: MarkdownViewStatusEnum,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum MarkdownViewStatusEnum {
     NotReady,
     Available,

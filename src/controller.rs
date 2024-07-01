@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec},
@@ -8,15 +9,33 @@ use k8s_openapi::{
     },
     apimachinery::pkg::{apis::meta::v1::LabelSelector, util::intstr::IntOrString},
 };
-use std::{error::Error, sync::Arc};
+use std::{sync::Arc, time::Duration};
+use thiserror::Error;
 
 use kube::{
     api::{ObjectMeta, Patch, PatchParams},
-    runtime::controller::Action,
+    runtime::{controller::Action, watcher::Config, Controller},
     Api, Client, ResourceExt,
 };
 
-use crate::MarkdownView;
+use crate::{MarkdownView, MarkdownViewStatusEnum};
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("SerializationError: {0}")]
+    SerializationError(#[source] serde_json::Error),
+    #[error("Kube Error: {0}")]
+    KubeError(#[source] kube::Error),
+    #[error("Finalizer Error: {0}")]
+    // NB: awkward type because finalizer::Error embeds the reconciler error (which is this)
+    // so boxing this error to break cycles
+    FinalizerError(#[source] Box<kube::runtime::finalizer::Error<Error>>),
+
+    #[error("Unknown Error")]
+    UnknownError,
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub struct Context {
     pub client: Client,
@@ -24,10 +43,7 @@ pub struct Context {
 
 const CONTROLLER_NAME: &str = "markdown-view-manager";
 
-async fn reconcile_configmap(
-    obj: Arc<MarkdownView>,
-    ctx: Arc<Context>,
-) -> Result<(), Box<dyn Error>> {
+async fn reconcile_configmap(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<()> {
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &obj.namespace().unwrap());
 
     let cm_name = format!("markdowns-{}", obj.name_any());
@@ -37,14 +53,12 @@ async fn reconcile_configmap(
     });
     let cm = cm_api
         .patch(&cm_name, &cm_pp, &Patch::Apply(&cm_patch))
-        .await?;
+        .await
+        .map_err(Error::KubeError)?;
     Ok(())
 }
 
-async fn reconcile_deployment(
-    obj: Arc<MarkdownView>,
-    ctx: Arc<Context>,
-) -> Result<(), Box<dyn Error>> {
+async fn reconcile_deployment(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<()> {
     let dep_name = format!("viewer-{}", obj.name_any());
 
     let viewer_image = obj
@@ -67,18 +81,25 @@ async fn reconcile_deployment(
     let deployment = Deployment {
         metadata: ObjectMeta {
             name: Some(dep_name),
-            labels: Some(serde_json::from_value(labels.clone())?),
+            labels: Some(
+                serde_json::from_value(labels.clone()).map_err(Error::SerializationError)?,
+            ),
             ..Default::default()
         },
         spec: Some(DeploymentSpec {
             replicas: Some(obj.spec.replicas as i32),
             selector: LabelSelector {
-                match_labels: Some(serde_json::from_value(labels.clone())?),
+                match_labels: Some(
+                    serde_json::from_value(labels.clone()).map_err(Error::SerializationError)?,
+                ),
                 match_expressions: None,
             },
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(serde_json::from_value(labels.clone())?),
+                    labels: Some(
+                        serde_json::from_value(labels.clone())
+                            .map_err(Error::SerializationError)?,
+                    ),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -140,15 +161,13 @@ async fn reconcile_deployment(
             &PatchParams::apply(CONTROLLER_NAME),
             &Patch::Apply(&deployment),
         )
-        .await?;
+        .await
+        .map_err(Error::KubeError)?;
 
     Ok(())
 }
 
-async fn reconcile_service(
-    obj: Arc<MarkdownView>,
-    ctx: Arc<Context>,
-) -> Result<(), Box<dyn Error>> {
+async fn reconcile_service(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<()> {
     let svc_name = format!("viewer-{}", obj.name_any());
     let labels = serde_json::json!({
         "app.kubernetes.io/name":"mdbook",
@@ -157,12 +176,16 @@ async fn reconcile_service(
     });
     let svc = Service {
         metadata: ObjectMeta {
-            labels: Some(serde_json::from_value(labels.clone())?),
+            labels: Some(
+                serde_json::from_value(labels.clone()).map_err(Error::SerializationError)?,
+            ),
             name: Some(svc_name),
             ..Default::default()
         },
         spec: Some(ServiceSpec {
-            selector: Some(serde_json::from_value(labels.clone())?),
+            selector: Some(
+                serde_json::from_value(labels.clone()).map_err(Error::SerializationError)?,
+            ),
             type_: Some("ClusterIP".to_string()),
             ports: Some(vec![ServicePort {
                 protocol: Some("TCP".to_string()),
@@ -182,16 +205,78 @@ async fn reconcile_service(
             &PatchParams::apply(CONTROLLER_NAME),
             &Patch::Apply(&svc),
         )
-        .await?;
+        .await
+        .map_err(Error::KubeError);
 
     Ok(())
 }
 
-async fn reconcile(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Action, Box<dyn Error>> {
+async fn update_status(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Action> {
+    let dep_name = format!("viewer-{}", obj.name_any());
+    let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &obj.namespace().unwrap());
+    let dep = dep_api.get(&dep_name).await.map_err(Error::KubeError)?;
+
+    let dep_replicas = dep.spec.as_ref().map(|spec| spec.replicas).flatten();
+
+    let status = match dep_replicas {
+        None => MarkdownViewStatusEnum::NotReady,
+        Some(replicas) if replicas == 0 => MarkdownViewStatusEnum::NotReady,
+        Some(replicas) if replicas == obj.spec.replicas as i32 => MarkdownViewStatusEnum::Available,
+        Some(_) => MarkdownViewStatusEnum::Healthy,
+    };
+
+    let md_view_api: Api<MarkdownView> = Api::namespaced(ctx.client.clone(), &obj.name_any());
+    let mut md_view = md_view_api
+        .get(&obj.name_any())
+        .await
+        .map_err(Error::KubeError)?;
+    if md_view.status != Some(status) {
+        md_view.status = Some(status);
+        md_view_api
+            .patch(
+                &obj.name_any(),
+                &PatchParams::apply(CONTROLLER_NAME),
+                &Patch::Apply(md_view),
+            )
+            .await
+            .map_err(Error::KubeError)?;
+    }
+
+    Ok(Action::requeue(Duration::from_secs(10)))
+}
+
+async fn reconcile(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Action> {
     let ns = obj.namespace().unwrap();
     let md_views: Api<MarkdownView> = Api::namespaced(ctx.client.clone(), &ns);
 
-    reconcile_configmap(Arc::clone(&obj), ctx).await?;
+    reconcile_configmap(Arc::clone(&obj), Arc::clone(&ctx)).await?;
 
-    Ok(Action::await_change())
+    reconcile_deployment(Arc::clone(&obj), Arc::clone(&ctx)).await?;
+
+    reconcile_service(Arc::clone(&obj), Arc::clone(&ctx)).await?;
+
+    return update_status(Arc::clone(&obj), Arc::clone(&ctx)).await;
+}
+
+fn error_policy(md_view: Arc<MarkdownView>, error: &Error, ctx: Arc<Context>) -> Action {
+    Action::requeue(Duration::from_secs(5 * 60))
+}
+
+pub async fn run() {
+    let client = Client::try_default()
+        .await
+        .expect("failed to create kube Client");
+    let md_views: Api<MarkdownView> = Api::all(client.clone());
+    Controller::new(md_views, Config::default().any_semantic())
+        .shutdown_on_signal()
+        .run(
+            reconcile,
+            error_policy,
+            Arc::new(Context {
+                client: client.clone(),
+            }),
+        )
+        .filter_map(|x| async move { std::result::Result::ok(x) })
+        .for_each(|_| futures::future::ready(()))
+        .await;
 }
