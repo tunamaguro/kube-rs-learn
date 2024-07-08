@@ -247,12 +247,17 @@ async fn update_status(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Acti
     let md_view_api: Api<MarkdownView> = Api::namespaced(ctx.client.clone(), &obj_namespace);
     let mut md_view = md_view_api.get(&obj_name).await.map_err(Error::KubeError)?;
     if md_view.status != Some(status) {
+        let new_status = serde_json::json!({
+            "apiVersion": "view.zoetrope.github.io/v1",
+            "kind": "MarkdownView",
+            "status": status
+        });
         md_view.status = Some(status);
         md_view_api
             .patch(
                 &obj_name,
                 &PatchParams::apply(CONTROLLER_NAME).force(),
-                &Patch::Apply(md_view),
+                &Patch::Apply(new_status),
             )
             .await
             .map_err(Error::KubeError)?;
