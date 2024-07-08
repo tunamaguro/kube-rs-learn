@@ -36,12 +36,13 @@ spec:
             - replicas
             type: object
           status:
-            enum:
-            - NotReady
-            - Available
-            - Healthy
             nullable: true
-            type: string
+            properties:
+              is_ok:
+                type: boolean
+            required:
+            - is_ok
+            type: object
         required:
         - spec
         title: MarkdownView

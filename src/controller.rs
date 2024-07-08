@@ -18,7 +18,7 @@ use kube::{
     Api, Client, Resource, ResourceExt,
 };
 
-use crate::{MarkdownView, MarkdownViewStatusEnum};
+use crate::{MarkdownView, MarkdownViewStatus, MarkdownViewStatusEnum};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -246,18 +246,20 @@ async fn update_status(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Acti
 
     let md_view_api: Api<MarkdownView> = Api::namespaced(ctx.client.clone(), &obj_namespace);
     let mut md_view = md_view_api.get(&obj_name).await.map_err(Error::KubeError)?;
-    if md_view.status != Some(status) {
+    if md_view.status.as_ref().map(|x| x.is_ok) == Some(false) {
         let new_status = serde_json::json!({
             "apiVersion": "view.zoetrope.github.io/v1",
             "kind": "MarkdownView",
-            "status": status
+            "status": MarkdownViewStatus{
+                is_ok: matches!(status,MarkdownViewStatusEnum::Available|MarkdownViewStatusEnum::Healthy)
+            }
         });
-        md_view.status = Some(status);
+        // md_view.status.as_mut().an = Some(status);
         md_view_api
             .patch(
                 &obj_name,
                 &PatchParams::apply(CONTROLLER_NAME).force(),
-                &Patch::Apply(new_status),
+                &Patch::Apply(md_view),
             )
             .await
             .map_err(Error::KubeError)?;
