@@ -23,8 +23,9 @@ pub struct MarkdownViewStatus {
     pub status: MarkdownViewStatusEnum,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum MarkdownViewStatusEnum {
+    #[default]
     NotReady,
     Available,
     Healthy,

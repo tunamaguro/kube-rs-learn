@@ -1,0 +1,52 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: markdownviews.view.zoetrope.github.io
+spec:
+  group: view.zoetrope.github.io
+  names:
+    categories: []
+    kind: MarkdownView
+    plural: markdownviews
+    shortNames: []
+    singular: markdownview
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for MarkdonwViewSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              markdowns:
+                additionalProperties:
+                  type: string
+                type: object
+              replicas:
+                format: uint32
+                minimum: 0.0
+                type: integer
+              viewerImage:
+                nullable: true
+                type: string
+            required:
+            - markdowns
+            - replicas
+            type: object
+          status:
+            enum:
+            - NotReady
+            - Available
+            - Healthy
+            nullable: true
+            type: string
+        required:
+        - spec
+        title: MarkdownView
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -14,8 +14,8 @@ use thiserror::Error;
 
 use kube::{
     api::{ObjectMeta, Patch, PatchParams},
-    runtime::{controller::Action, watcher::Config, Controller},
-    Api, Client, ResourceExt,
+    runtime::{controller::Action, reflector::Lookup, watcher::Config, Controller},
+    Api, Client, Resource, ResourceExt,
 };
 
 use crate::{MarkdownView, MarkdownViewStatusEnum};
@@ -44,21 +44,34 @@ pub struct Context {
 const CONTROLLER_NAME: &str = "markdown-view-manager";
 
 async fn reconcile_configmap(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<()> {
-    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &obj.namespace().unwrap());
+    println!("reconcile configmap start!");
+    let obj_namespace = ResourceExt::namespace(obj.as_ref()).expect("cannot found");
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &obj_namespace);
 
     let cm_name = format!("markdowns-{}", obj.name_any());
     let cm_pp = PatchParams::apply(CONTROLLER_NAME);
-    let cm_patch = serde_json::json!({
-        "data":obj.spec.markdowns
-    });
+    let config_map = ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(cm_name.clone()),
+            owner_references: Some(vec![obj.controller_owner_ref(&()).unwrap()]),
+            ..Default::default()
+        },
+        data: Some(obj.spec.markdowns.clone()),
+        ..Default::default()
+    };
     let cm = cm_api
-        .patch(&cm_name, &cm_pp, &Patch::Apply(&cm_patch))
+        .patch(
+            config_map.metadata.name.as_deref().unwrap(),
+            &cm_pp,
+            &Patch::Apply(&config_map),
+        )
         .await
         .map_err(Error::KubeError)?;
     Ok(())
 }
 
 async fn reconcile_deployment(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<()> {
+    println!("reconcile deployment start!");
     let dep_name = format!("viewer-{}", obj.name_any());
 
     let viewer_image = obj
@@ -153,8 +166,10 @@ async fn reconcile_deployment(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Resu
         }),
         ..Default::default()
     };
-
-    let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &obj.namespace().unwrap());
+    let dep_api: Api<Deployment> = Api::namespaced(
+        ctx.client.clone(),
+        &ResourceExt::namespace(obj.as_ref()).expect("cannot found"),
+    );
     let dep_patch = dep_api
         .patch(
             deployment.metadata.name.as_deref().unwrap(),
@@ -168,6 +183,8 @@ async fn reconcile_deployment(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Resu
 }
 
 async fn reconcile_service(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<()> {
+    println!("reconcile service start!");
+    let obj_namaespace = ResourceExt::namespace(obj.as_ref()).expect("cannot found namespace");
     let svc_name = format!("viewer-{}", obj.name_any());
     let labels = serde_json::json!({
         "app.kubernetes.io/name":"mdbook",
@@ -197,8 +214,7 @@ async fn reconcile_service(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<
         }),
         ..Default::default()
     };
-
-    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &obj.namespace().unwrap());
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &obj_namaespace);
     let svc_patch = svc_api
         .patch(
             svc.metadata.name.as_deref().unwrap(),
@@ -206,36 +222,36 @@ async fn reconcile_service(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<
             &Patch::Apply(&svc),
         )
         .await
-        .map_err(Error::KubeError);
+        .map_err(Error::KubeError)?;
 
     Ok(())
 }
 
 async fn update_status(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Action> {
-    let dep_name = format!("viewer-{}", obj.name_any());
-    let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &obj.namespace().unwrap());
+    println!("start update status!");
+    let obj_name = obj.name().expect("cannot found");
+    let obj_namespace = ResourceExt::namespace(obj.as_ref()).expect("cannot found");
+    let dep_name = format!("viewer-{}", obj_name);
+    let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &obj_namespace);
     let dep = dep_api.get(&dep_name).await.map_err(Error::KubeError)?;
 
-    let dep_replicas = dep.spec.as_ref().map(|spec| spec.replicas).flatten();
+    let dep_replicas = dep.spec.as_ref().and_then(|spec| spec.replicas);
 
     let status = match dep_replicas {
         None => MarkdownViewStatusEnum::NotReady,
-        Some(replicas) if replicas == 0 => MarkdownViewStatusEnum::NotReady,
+        Some(0) => MarkdownViewStatusEnum::NotReady,
         Some(replicas) if replicas == obj.spec.replicas as i32 => MarkdownViewStatusEnum::Available,
         Some(_) => MarkdownViewStatusEnum::Healthy,
     };
 
-    let md_view_api: Api<MarkdownView> = Api::namespaced(ctx.client.clone(), &obj.name_any());
-    let mut md_view = md_view_api
-        .get(&obj.name_any())
-        .await
-        .map_err(Error::KubeError)?;
+    let md_view_api: Api<MarkdownView> = Api::namespaced(ctx.client.clone(), &obj_namespace);
+    let mut md_view = md_view_api.get(&obj_name).await.map_err(Error::KubeError)?;
     if md_view.status != Some(status) {
         md_view.status = Some(status);
         md_view_api
             .patch(
-                &obj.name_any(),
-                &PatchParams::apply(CONTROLLER_NAME),
+                &obj_name,
+                &PatchParams::apply(CONTROLLER_NAME).force(),
                 &Patch::Apply(md_view),
             )
             .await
@@ -246,7 +262,8 @@ async fn update_status(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Acti
 }
 
 async fn reconcile(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Action> {
-    let ns = obj.namespace().unwrap();
+    println!("reconcile start!");
+    let ns = ResourceExt::namespace(obj.as_ref()).unwrap();
     let md_views: Api<MarkdownView> = Api::namespaced(ctx.client.clone(), &ns);
 
     reconcile_configmap(Arc::clone(&obj), Arc::clone(&ctx)).await?;
@@ -259,7 +276,8 @@ async fn reconcile(obj: Arc<MarkdownView>, ctx: Arc<Context>) -> Result<Action> 
 }
 
 fn error_policy(md_view: Arc<MarkdownView>, error: &Error, ctx: Arc<Context>) -> Action {
-    Action::requeue(Duration::from_secs(5 * 60))
+    println!("something went wrong: {}", error);
+    Action::requeue(Duration::from_secs(5))
 }
 
 pub async fn run() {

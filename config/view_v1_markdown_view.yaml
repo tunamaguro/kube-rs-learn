@@ -1,0 +1,23 @@
+# Copy from https://github.com/zoetrope/kubebuilder-training/blob/8761e80b6f6db251d46a3bc27549035aa4da4486/codes/20_manifests/config/samples/view_v1_markdownview.yaml
+apiVersion: view.zoetrope.github.io/v1
+kind: MarkdownView
+metadata:
+  labels:
+    app.kubernetes.io/name: markdownview
+    app.kubernetes.io/instance: markdownview-sample
+    app.kubernetes.io/part-of: markdown-view
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: markdown-view
+  name: markdownview-sample
+spec:
+  markdowns:
+    SUMMARY.md: |
+      # Summary
+
+      - [Page1](page1.md)
+    page1.md: |
+      # Page 1
+
+      一ページ目のコンテンツです。
+  replicas: 1
+  viewerImage: "peaceiris/mdbook:latest"
